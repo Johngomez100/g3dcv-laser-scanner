@@ -1,0 +1,18 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.validation_packages/
+
+# Generated reconstruction artifacts
+output/
+*.ply
+*.json
+*_debug.mp4
+
+# Course data - expressly excluded from the exam submission
+*.mp4
+*.mov
+K.txt
+dist.txt
+plane.pdf
