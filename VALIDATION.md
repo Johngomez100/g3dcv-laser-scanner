@@ -2,9 +2,9 @@
 
 Historical comparison predating the project-brief audit. The dimensions and
 marker exclusion used below are superseded: Figure 3 specifies inner 23 x 13 cm
-and outer 25 x 15 cm. Current validation, including MeshLab import and all-scene
-reconstruction, is recorded in BRIEF_COMPLIANCE.md. Do not use the dimensions
-below for a new run.
+and outer 25 x 15 cm. The current full-scene run produced 444,099 points and was
+opened successfully in MeshLab. Do not use the historical dimensions below for
+a new run; use the configuration in README.md.
 
 Baseline: repository commit `7bd5470`, before the detector/calibration changes.
 Comparison input: the local course `cup1.mp4` (933 frames), supplied `K.txt` and

@@ -76,12 +76,3 @@ Open `output\cup1_p1.ply` in MeshLab. Inspect the debug MP4: green polygons must
 Run checks with `python -m pytest -q` if pytest is installed in your development environment; it is not required for reconstruction.
 
 Subpixel corner refinement, stationary calibration, and separate object/marker settings were motivated by comparison with [LolloneS/3D-Laser-Scanner](https://github.com/LolloneS/3D-Laser-Scanner). The implementation here retains NumPy/OpenCV and uses segment-wise sampling with connected-component filtering, without adding DBSCAN or Open3D dependencies.
-
-## Submission checklist
-
-- Run the scanner on at least one of the four provided videos and verify the generated PLY opens in MeshLab.
-- Include `laser_scanner.py`, the entire `scanner/` source folder, `requirements.txt`, and this README; do **not** include videos, images, or calibration data.
-- Package the code as `<name>_<surname>_exam.zip` at least one week before the booked oral date.
-- Bring the laptop, the code, a tested video/data copy for the live demo, and the generated PLY/debug MP4.
-
-See `EXAM_NOTES.md` for the explanation flow and limitations to discuss at the oral exam.
