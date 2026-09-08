@@ -33,9 +33,10 @@ def marker_candidates(frame: np.ndarray, min_area: float) -> list[np.ndarray]:
         blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 51, 4
     )
     candidates: list[tuple[float, np.ndarray]] = []
+    inner_candidates: list[tuple[float, np.ndarray]] = []
     for binary in (binary_otsu, binary_adaptive):
-        contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        for contour in contours:
+        contours, hierarchy = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        for contour_index, contour in enumerate(contours):
             area = cv2.contourArea(contour)
             if area < min_area:
                 continue
@@ -49,10 +50,19 @@ def marker_candidates(frame: np.ndarray, min_area: float) -> list[np.ndarray]:
             if len(polygon) != 4 or not cv2.isContourConvex(polygon):
                 continue
             candidates.append((area, order_corners(polygon.reshape(4, 2))))
+            # White interior enclosed by a black border: an even-depth contour
+            # inside a hole. Excludes the larger outer black-border boundary.
+            depth = 0
+            parent = hierarchy[0, contour_index, 3]
+            while parent != -1:
+                depth += 1
+                parent = hierarchy[0, parent, 3]
+            if depth >= 2 and depth % 2 == 0:
+                inner_candidates.append(candidates[-1])
 
     # RETR_LIST and the two threshold methods can find the same sheet repeatedly.
     selected: list[np.ndarray] = []
-    for _, corners in sorted(candidates, key=lambda item: item[0], reverse=True):
+    for _, corners in sorted(inner_candidates or candidates, key=lambda item: item[0], reverse=True):
         centre = np.mean(corners, axis=0)
         if all(np.linalg.norm(centre - np.mean(other, axis=0)) > 20 for other in selected):
             selected.append(corners)
@@ -61,56 +71,68 @@ def marker_candidates(frame: np.ndarray, min_area: float) -> list[np.ndarray]:
     return selected
 
 
+def refine_marker_corners(frame: np.ndarray, corners: list[np.ndarray]) -> list[np.ndarray]:
+    """Refine detected boundaries locally without jumping across the black border."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    refined = []
+    for polygon in corners:
+        candidate = cv2.cornerSubPix(
+            gray, polygon.astype(np.float32).reshape(-1, 1, 2).copy(),
+            (5, 5), (-1, -1),
+            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
+        ).reshape(4, 2)
+        if (np.isfinite(candidate).all()
+                and np.max(np.linalg.norm(candidate - polygon, axis=1)) <= 5
+                and cv2.isContourConvex(candidate)):
+            refined.append(candidate)
+        else:
+            refined.append(polygon.copy())
+    return refined
+
+
 def red_laser_mask(frame: np.ndarray, min_red_excess: int, min_red: int) -> np.ndarray:
-    """Return a cleaned binary mask of pixels that are likely part of the laser."""
+    """Threshold red excess without eroding thin, genuine laser stripes.
+
+    Connected-component filtering in laser_pixels removes isolated detections.
+    A 3x3 opening here would erase stripes only one or two pixels wide.
+    """
     blue, green, red = cv2.split(frame.astype(np.int16))
-    red_excess = red - np.maximum(blue, green)
-    mask = (red > min_red) & (red_excess > min_red_excess)
-    return cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return ((red > min_red) & (red - np.maximum(blue, green) > min_red_excess)).astype(np.uint8)
 
 
 def laser_pixels(
-    frame: np.ndarray, min_red_excess: int, min_red: int, min_component_pixels: int = 12, max_row_jump: float = 25.0
+    frame: np.ndarray, min_red_excess: int, min_red: int,
+    min_component_pixels: int = 12, max_row_jump: float = 25.0,
+    region_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Extract one weighted centre sample per row from spatially consistent laser components.
+    """Return one centre per contiguous stripe segment per row.
 
-    Tiny red blobs are removed with connected-component filtering.  Samples that
-    jump abruptly between adjacent rows are discarded, which rejects isolated
-    red reflections while retaining the continuous projected laser stripe.
+    Separate surfaces can produce several stripes in the same row. Never
+    average across the gaps between them: that creates false camera rays.
+    The optional region mask lets marker and object thresholds be independent.
     """
     mask = red_laser_mask(frame, min_red_excess, min_red)
-    component_count, labels, statistics, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    keep_labels = np.flatnonzero(statistics[:, cv2.CC_STAT_AREA] >= min_component_pixels)
-    keep_labels = keep_labels[keep_labels != 0]
-    if len(keep_labels) == 0:
-        return np.empty((0, 2), dtype=np.float64)
-    mask = np.isin(labels, keep_labels)
+    if region_mask is not None:
+        mask &= region_mask.astype(np.uint8)
+    _, labels, statistics, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    keep = statistics[:, cv2.CC_STAT_AREA] >= min_component_pixels
+    keep[0] = False
+    mask = keep[labels]
     blue, green, red = cv2.split(frame.astype(np.int16))
-    red_excess = red - np.maximum(blue, green)
-
-    pixels: list[tuple[float, float]] = []
-    for y, row in enumerate(mask):
-        xs = np.flatnonzero(row)
-        if len(xs) == 0:
-            continue
-        # A red score-weighted centroid avoids emitting every pixel in a thick line.
-        weights = red_excess[y, xs].astype(np.float64)
-        x = float(np.average(xs, weights=np.maximum(weights, 1.0)))
-        pixels.append((x, float(y)))
-    samples = np.asarray(pixels, dtype=np.float64)
-    if len(samples) < 3:
-        return samples
-
-    # Keep a row only when its position agrees with a nearby row.  The test on
-    # both sides avoids preserving a single outlying red reflection.
-    keep = np.ones(len(samples), dtype=bool)
-    for index in range(1, len(samples) - 1):
-        previous_y, next_y = samples[index - 1, 1], samples[index + 1, 1]
-        if next_y - previous_y <= 2.0:
-            close_to_previous = abs(samples[index, 0] - samples[index - 1, 0]) <= max_row_jump
-            close_to_next = abs(samples[index, 0] - samples[index + 1, 0]) <= max_row_jump
-            keep[index] = close_to_previous or close_to_next
-    return samples[keep]
+    score = red - np.maximum(blue, green)
+    rows: dict[int, list[float]] = {}
+    for y in np.flatnonzero(mask.any(axis=1)):
+        xs = np.flatnonzero(mask[y])
+        segments = np.split(xs, np.flatnonzero(np.diff(xs) > 1) + 1)
+        rows[int(y)] = [float(np.average(segment, weights=np.maximum(score[y, segment], 1)))
+                        for segment in segments]
+    pixels = []
+    for y, centres in rows.items():
+        neighbours = [x for dy in (-2, -1, 1, 2) for x in rows.get(y + dy, [])]
+        for x in centres:
+            if any(abs(x - other) <= max_row_jump for other in neighbours):
+                pixels.append((x, float(y)))
+    return np.asarray(pixels, dtype=np.float64).reshape(-1, 2)
 
 
 def sample_laser_free_colours(

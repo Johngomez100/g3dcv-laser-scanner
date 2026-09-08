@@ -75,3 +75,21 @@ def backproject(pixels: np.ndarray, camera_matrix: np.ndarray) -> np.ndarray:
     homogeneous = np.column_stack((pixels, np.ones(len(pixels))))
     directions = (np.linalg.inv(camera_matrix) @ homogeneous.T).T
     return directions / np.linalg.norm(directions, axis=1, keepdims=True)
+
+
+def p1_reference(corners: np.ndarray, camera_matrix: np.ndarray, width: float, height: float) -> tuple[np.ndarray, np.ndarray]:
+    """Camera-space origin and basis: P1 top-left, X right, Y down, Z outward.
+
+    This intentionally left-handed convention follows the user's diagram.
+    For row-vector camera points, coordinates are (points - origin) @ basis.
+    """
+    model = np.array([[0., 0., 0.], [width, 0., 0.],
+                      [width, height, 0.], [0., height, 0.]])
+    success, rotation_vector, translation = cv2.solvePnP(
+        model, np.asarray(corners, dtype=np.float64), camera_matrix,
+        np.zeros((5, 1)), flags=cv2.SOLVEPNP_IPPE,
+    )
+    if not success:
+        raise RuntimeError("Could not estimate the P1 reference frame")
+    rotation, _ = cv2.Rodrigues(rotation_vector)
+    return translation.reshape(3), rotation @ np.diag([1., 1., -1.])
