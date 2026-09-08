@@ -2,6 +2,30 @@
 
 This project reconstructs a coloured point cloud from one of the course laser-sweep videos. It deliberately has no manual click/selection step: every frame is analysed automatically.
 
+## Code structure and reading guide
+
+The scanner is split by responsibility. Start with `scanner/pipeline.py` to follow
+the reconstruction steps, then open the module for the step you want to study.
+
+| File | Responsibility |
+| --- | --- |
+| `laser_scanner.py` | Small launcher; also preserves the original imports used by tests and notebooks. |
+| `scanner/cli.py` | Defines command-line arguments and starts the run. |
+| `scanner/pipeline.py` | Reads video frames, connects detection to geometry, accumulates points, and writes debug video and timing statistics. |
+| `scanner/detection.py` | Detects marker corners and laser pixels, checks marker membership, and samples surface colours. |
+| `scanner/geometry.py` | Defines planes, estimates marker poses, back-projects rays, intersects rays with planes, and fits the laser plane. |
+| `scanner/point_cloud.py` | Downsamples points and writes the coloured PLY file. |
+| `test_geometry.py` | Checks geometry and detection using synthetic inputs. |
+
+The execution order is `laser_scanner.py` -> `scanner/cli.py` ->
+`scanner/pipeline.py`. The pipeline calls the detection, geometry, and point-cloud
+functions as needed. This reorganization preserves the existing algorithms,
+threshold defaults, command-line options, and output formats. Existing run
+commands and `run_cup1.ps1` still use `laser_scanner.py`.
+
+Keep the entire `scanner` folder alongside `laser_scanner.py` when copying or
+submitting the project; the launcher is no longer a standalone file.
+
 ## What it implements
 
 1. Undistort the frame with the supplied camera intrinsics and radial distortion coefficients.
@@ -43,7 +67,7 @@ Open `output\cup1.ply` in MeshLab. Also inspect the debug MP4: green polygons sh
 ## Submission checklist
 
 - Run the scanner on at least one of the four provided videos and verify the generated PLY opens in MeshLab.
-- Include source code, `requirements.txt`, and this README; do **not** include videos, images, or calibration data.
+- Include `laser_scanner.py`, the entire `scanner/` source folder, `requirements.txt`, and this README; do **not** include videos, images, or calibration data.
 - Package the code as `<name>_<surname>_exam.zip` at least one week before the booked oral date.
 - Bring the laptop, the code, a tested video/data copy for the live demo, and the generated PLY/debug MP4.
 
