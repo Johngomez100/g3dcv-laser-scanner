@@ -3,7 +3,14 @@
 import cv2
 import numpy as np
 
-from laser_scanner import Plane, fit_plane, intersect_rays_plane, laser_pixels, marker_candidates
+from laser_scanner import (
+    Plane,
+    fit_plane,
+    intersect_rays_plane,
+    laser_pixels,
+    marker_candidates,
+    sample_laser_free_colours,
+)
 
 
 def test_fit_plane_and_intersection() -> None:
@@ -32,3 +39,12 @@ def test_image_primitives_on_clean_synthetic_frame() -> None:
     samples = laser_pixels(frame, min_red_excess=50, min_red=120)
     assert len(markers) == 2
     assert len(samples) > 0
+
+
+def test_laser_free_colour_avoids_red_laser_tint() -> None:
+    frame = np.full((21, 21, 3), (30, 100, 180), dtype=np.uint8)
+    cv2.line(frame, (10, 3), (10, 17), (0, 0, 255), 3)
+    colours = sample_laser_free_colours(
+        frame, np.array([[10.0, 10.0]]), min_red_excess=50, min_red=120, radius=3
+    )
+    assert np.array_equal(colours[0], np.array([30, 100, 180], dtype=np.uint8))

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -37,9 +38,11 @@ class Plane:
 @dataclass
 class ScanStats:
     frames_read: int = 0
+    frames_processed: int = 0
     frames_with_markers: int = 0
     frames_reconstructed: int = 0
     points_before_downsampling: int = 0
+    elapsed_processing_seconds: float = 0.0
 
 
 def normalize(vector: np.ndarray) -> np.ndarray:
@@ -149,12 +152,32 @@ def estimate_marker_planes(
     return planes
 
 
-def laser_pixels(frame: np.ndarray, min_red_excess: int, min_red: int) -> np.ndarray:
-    """Extract one sub-pixel-free centre sample per image row from the red laser line."""
+def red_laser_mask(frame: np.ndarray, min_red_excess: int, min_red: int) -> np.ndarray:
+    """Return a cleaned binary mask of pixels that are likely part of the laser."""
     blue, green, red = cv2.split(frame.astype(np.int16))
     red_excess = red - np.maximum(blue, green)
     mask = (red > min_red) & (red_excess > min_red_excess)
-    mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+
+def laser_pixels(
+    frame: np.ndarray, min_red_excess: int, min_red: int, min_component_pixels: int = 12, max_row_jump: float = 25.0
+) -> np.ndarray:
+    """Extract one weighted centre sample per row from spatially consistent laser components.
+
+    Tiny red blobs are removed with connected-component filtering.  Samples that
+    jump abruptly between adjacent rows are discarded, which rejects isolated
+    red reflections while retaining the continuous projected laser stripe.
+    """
+    mask = red_laser_mask(frame, min_red_excess, min_red)
+    component_count, labels, statistics, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    keep_labels = np.flatnonzero(statistics[:, cv2.CC_STAT_AREA] >= min_component_pixels)
+    keep_labels = keep_labels[keep_labels != 0]
+    if len(keep_labels) == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    mask = np.isin(labels, keep_labels)
+    blue, green, red = cv2.split(frame.astype(np.int16))
+    red_excess = red - np.maximum(blue, green)
 
     pixels: list[tuple[float, float]] = []
     for y, row in enumerate(mask):
@@ -165,7 +188,44 @@ def laser_pixels(frame: np.ndarray, min_red_excess: int, min_red: int) -> np.nda
         weights = red_excess[y, xs].astype(np.float64)
         x = float(np.average(xs, weights=np.maximum(weights, 1.0)))
         pixels.append((x, float(y)))
-    return np.asarray(pixels, dtype=np.float64)
+    samples = np.asarray(pixels, dtype=np.float64)
+    if len(samples) < 3:
+        return samples
+
+    # Keep a row only when its position agrees with a nearby row.  The test on
+    # both sides avoids preserving a single outlying red reflection.
+    keep = np.ones(len(samples), dtype=bool)
+    for index in range(1, len(samples) - 1):
+        previous_y, next_y = samples[index - 1, 1], samples[index + 1, 1]
+        if next_y - previous_y <= 2.0:
+            close_to_previous = abs(samples[index, 0] - samples[index - 1, 0]) <= max_row_jump
+            close_to_next = abs(samples[index, 0] - samples[index + 1, 0]) <= max_row_jump
+            keep[index] = close_to_previous or close_to_next
+    return samples[keep]
+
+
+def sample_laser_free_colours(
+    frame: np.ndarray, pixels: np.ndarray, min_red_excess: int, min_red: int, radius: int
+) -> np.ndarray:
+    """Estimate surface colour from nearby non-laser pixels, avoiding red laser tint."""
+    if radius <= 0:
+        indices = np.rint(pixels).astype(np.int32)
+        indices[:, 0] = np.clip(indices[:, 0], 0, frame.shape[1] - 1)
+        indices[:, 1] = np.clip(indices[:, 1], 0, frame.shape[0] - 1)
+        return frame[indices[:, 1], indices[:, 0]]
+
+    laser = red_laser_mask(frame, min_red_excess, min_red).astype(bool)
+    colours: list[np.ndarray] = []
+    for x_float, y_float in pixels:
+        x, y = int(round(x_float)), int(round(y_float))
+        x0, x1 = max(0, x - radius), min(frame.shape[1], x + radius + 1)
+        y0, y1 = max(0, y - radius), min(frame.shape[0], y + radius + 1)
+        neighbourhood = frame[y0:y1, x0:x1]
+        usable = neighbourhood[~laser[y0:y1, x0:x1]]
+        # If the laser fills the small neighbourhood, retaining the centre
+        # colour is preferable to dropping a valid 3-D sample.
+        colours.append(np.median(usable, axis=0) if len(usable) else frame[y, x])
+    return np.asarray(colours, dtype=np.uint8)
 
 
 def backproject(pixels: np.ndarray, camera_matrix: np.ndarray) -> np.ndarray:
@@ -199,6 +259,7 @@ def voxel_downsample(points: np.ndarray, colours: np.ndarray, voxel_size: float)
 
 
 def process_video(args: argparse.Namespace) -> ScanStats:
+    start_time = time.perf_counter()
     camera_matrix = np.loadtxt(args.intrinsics, dtype=np.float64).reshape(3, 3)
     distortion = np.loadtxt(args.distortion, dtype=np.float64).reshape(-1, 1)
     capture = cv2.VideoCapture(str(args.video))
@@ -219,6 +280,7 @@ def process_video(args: argparse.Namespace) -> ScanStats:
         stats.frames_read += 1
         if (stats.frames_read - 1) % args.frame_stride:
             continue
+        stats.frames_processed += 1
         frame = cv2.undistort(raw_frame, camera_matrix, distortion)
         corners = marker_candidates(frame, args.min_marker_area)
         if len(corners) == 2:
@@ -232,7 +294,9 @@ def process_video(args: argparse.Namespace) -> ScanStats:
         if len(marker_planes) != 2:
             continue
         stats.frames_with_markers += 1
-        pixels = laser_pixels(frame, args.min_red_excess, args.min_red)
+        pixels = laser_pixels(
+            frame, args.min_red_excess, args.min_red, args.min_laser_component_pixels, args.max_laser_row_jump
+        )
         if len(pixels) == 0:
             continue
         directions = backproject(pixels, camera_matrix)
@@ -250,10 +314,9 @@ def process_video(args: argparse.Namespace) -> ScanStats:
         object_pixels = pixels[object_membership][valid]
         if len(object_points) == 0:
             continue
-        pixel_indices = np.rint(object_pixels).astype(np.int32)
-        pixel_indices[:, 0] = np.clip(pixel_indices[:, 0], 0, frame.shape[1] - 1)
-        pixel_indices[:, 1] = np.clip(pixel_indices[:, 1], 0, frame.shape[0] - 1)
-        colours = frame[pixel_indices[:, 1], pixel_indices[:, 0]]
+        colours = sample_laser_free_colours(
+            frame, object_pixels, args.min_red_excess, args.min_red, args.colour_radius
+        )
         points_accumulated.append(object_points)
         colours_accumulated.append(colours)
         stats.frames_reconstructed += 1
@@ -279,7 +342,12 @@ def process_video(args: argparse.Namespace) -> ScanStats:
     colours = np.vstack(colours_accumulated)
     points, colours = voxel_downsample(points, colours, args.voxel_size)
     write_ply(args.output, points, colours)
-    args.output.with_suffix(".json").write_text(json.dumps({**stats.__dict__, "points_written": int(len(points))}, indent=2), encoding="utf-8")
+    stats.elapsed_processing_seconds = time.perf_counter() - start_time
+    report = {
+        **stats.__dict__, "points_written": int(len(points)),
+        "processed_frames_per_second": stats.frames_processed / max(stats.elapsed_processing_seconds, EPS),
+    }
+    args.output.with_suffix(".json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return stats
 
 
@@ -294,6 +362,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-marker-area", type=float, default=2_000, help="Minimum marker area in pixels")
     parser.add_argument("--min-red", type=int, default=120, help="Minimum R intensity for laser extraction")
     parser.add_argument("--min-red-excess", type=int, default=50, help="Minimum R - max(G,B) laser score")
+    parser.add_argument("--min-laser-component-pixels", type=int, default=12, help="Reject smaller isolated laser-mask blobs")
+    parser.add_argument("--max-laser-row-jump", type=float, default=25.0, help="Largest consistent laser x shift between nearby rows")
+    parser.add_argument("--colour-radius", type=int, default=2, help="Radius for laser-free median surface colour; 0 keeps raw laser pixels")
     parser.add_argument("--min-marker-samples", type=int, default=6, help="Laser samples required on each marker")
     parser.add_argument("--frame-stride", type=int, default=1, help="Process every Nth frame")
     parser.add_argument("--voxel-size", type=float, default=0.002, help="Voxel size in marker units; 0 disables downsampling")
@@ -306,4 +377,7 @@ if __name__ == "__main__":
     if cli_args.frame_stride < 1:
         raise SystemExit("--frame-stride must be at least 1")
     result = process_video(cli_args)
-    print(f"Reconstructed {result.points_before_downsampling} samples from {result.frames_reconstructed} frames.")
+    print(
+        f"Reconstructed {result.points_before_downsampling} samples from {result.frames_reconstructed} frames "
+        f"in {result.elapsed_processing_seconds:.2f}s."
+    )

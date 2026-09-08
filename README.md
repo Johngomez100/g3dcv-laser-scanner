@@ -7,10 +7,10 @@ This project reconstructs a coloured point cloud from one of the course laser-sw
 1. Undistort the frame with the supplied camera intrinsics and radial distortion coefficients.
 2. Detect the two bright rectangular calibration markers with thresholding, contours and polygon approximation.
 3. Use the known marker dimensions and `solvePnP` to estimate the markers' 3-D planes in camera coordinates.
-4. Segment red laser pixels, retaining one intensity-weighted centre point per image row.
+4. Segment red laser pixels, reject tiny disconnected blobs and retain one intensity-weighted, spatially consistent centre point per image row.
 5. Back-project marker laser pixels through `K^-1`, intersect them with their known marker planes, and use SVD to fit the laser plane.
-6. Intersect the remaining laser rays with that laser plane; store their original pixel colours.
-7. Voxel-downsample the accumulated points and write a MeshLab-compatible ASCII PLY.
+6. Intersect the remaining laser rays with that laser plane; estimate each surface colour from neighbouring non-laser pixels so the red projector light does not tint the model.
+7. Voxel-downsample the accumulated points, report run timing, and write a MeshLab-compatible ASCII PLY.
 
 ## Setup
 
@@ -38,7 +38,7 @@ python laser_scanner.py `
 
 The `0.210 x 0.297` values above are only an A4-sized example, not a replacement for the dimensions stated on the supplied `plane.pdf`.
 
-Open `output\cup1.ply` in MeshLab. Also inspect the debug MP4: green polygons should trace both markers and cyan dots should trace only the laser line. If not, tune `--min-red`, `--min-red-excess`, and (if necessary) `--min-marker-area` for the provided videos.
+Open `output\cup1.ply` in MeshLab. Also inspect the debug MP4: green polygons should trace both markers and cyan dots should trace only the laser line. If not, tune `--min-red`, `--min-red-excess`, and (if necessary) `--min-marker-area` for the provided videos. The companion JSON report includes processing time and processed frames per second. For unusually noisy footage, raise `--min-laser-component-pixels` or lower `--max-laser-row-jump`; `--colour-radius 0` retains raw (laser-tinted) pixel colours for comparison.
 
 ## Submission checklist
 
